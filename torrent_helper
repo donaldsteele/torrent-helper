@@ -1,0 +1,332 @@
+#!/usr/bin/php
+
+<?php
+
+/* refrence
+https://code.google.com/archive/p/gi-torrent/wikis/rTorrent_XMLRPC_reference.wiki
+https://github.com/vegham/w3btorrent/blob/master/inc/class/rtorrent.class.php
+http://rutorrent.googlecode.com/svn/trunk/rutorrent/js/rtorrent.js
+https://github.com/Novik/ruTorrent/blob/master/js/rtorrent.js
+http://avalanche-rt.googlecode.com/svn/trunk/lib/rtorrent.php
+*/
+
+class Config
+{
+    CONST HOST = 'box-XXXXX.kphservices.com'; //seed box host
+    CONST USER = 'XXXXX'; 
+    CONST PASS = 'XXXXXXXXX';
+    CONST URL = 'https://XXXXXXXXXX.com/rt/XXXXXXX'; //may need to change based on your rtorrent setup
+    CONST FILE_MANAGER_LOCAL_PATH = '/completed/UnProcessed/'; //this is the path that file manager see's normally this is a subset of RTORRENT_TORRENT_STORAGE_PATH
+    CONST AMC_OUTPUT_PATH = '/mnt/vault/Media/XXXXXXXXXXX'; //location where amc script should store sorted media
+    CONST FILE_MANAGER_FLM_URL = 'https://XXXXXXXXXX.com/plugins/filemanager/flm.php'; //full url to the file manager plugin for rutorrent
+    CONST RTORRENT_TORRENT_STORAGE_PATH = '/home/XXXXXXXX/completed/UnProcessed'; //this is the path on the seedbox server to your torrents
+    CONST LOCAL_TORRENT_PATH = '/mnt/vault/XXXXXXXXX'; //
+	CONST PEERS_MAX = 200; //for torrents actively downloading set the peers_max value to this
+    CONST DEBUG = True;
+    
+}
+if (Config::DEBUG) {	
+ini_set('display_errors', 1);
+error_reporting(E_ALL);
+}
+
+function do_call($request)
+{
+    
+    $host = Config::HOST;
+    $user = Config::USER;
+    $pass = Config::PASS;
+    $url  = Config::URL;
+    
+    $header[] = "Content-type: text/xml";
+    $header[] = "Content-length: " . strlen($request);
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $header);
+    curl_setopt($ch, CURLOPT_HEADER, false);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $request);
+    curl_setopt($ch, CURLOPT_USERPWD, "$user:$pass");
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_ANY);
+    
+    $data = curl_exec($ch);
+    if (curl_errno($ch)) {
+        print_debug(curl_error($ch));
+    } else {
+        curl_close($ch);
+        return xmlrpc_decode(str_replace('i8>', 'i4>', $data));
+    }
+}
+
+
+function Remove_Torrent_Files($filename)
+{
+    //dumb hack : i cant find another way to actually delete the torrent files themselfs maybe convert to sftp call?
+    
+    
+    $postData         = '';
+    $params           = array();
+    $params['dir']    = Config::FILE_MANAGER_LOCAL_PATH;
+    $params['action'] = 'rm';
+    
+    $params['fls'] = json_encode(array(
+        "$filename/"
+    ), JSON_FORCE_OBJECT);
+    
+    foreach ($params as $k => $v) {
+        $postData .= $k . '=' . $v . '&';
+    }
+    $postData = rtrim($postData, '&');
+    
+    do_call($postData);
+}
+
+
+function get_files_by_hash($torrents)
+{
+    
+    foreach ($torrents as $index => $keys) {
+        
+        $hash                    = $keys[0];
+        $info                    = array(
+            "f.get_frozen_path="
+        );
+        $request                 = xmlrpc_encode_request("f.multicall", array_merge(array(
+            $hash,
+            null
+        ), $info));
+        $file[$keys[1]]['files'] = arrayFlatten(do_call($request), CONFIG::RTORRENT_TORRENT_STORAGE_PATH);
+        $file[$keys[1]]['hash']  = $keys[0];
+    }
+    if (isset($file) && !empty($file)) {
+        return $file;
+    } else {
+        $file = array();
+        return $file;
+    }
+}
+
+function get_torrents_by_view($view_name)
+{
+    $info = array(
+        "d.get_hash=",
+        "d.get_name=",
+        "d.get_chunk_size=", //Get the size of a single chunk in bytes
+        "d.get_peers_max=",
+        "d.get_size_chunks=", //Get how many chunks are in the torrent
+        "d.get_completed_chunks=", //Get how many chunks have downloaded
+        "d.get_complete=",
+        "d.get_base_path="
+    );
+    
+    $request = xmlrpc_encode_request("d.multicall", array_merge(array(
+        $view_name
+    ), $info));
+    return do_call($request);
+    
+}
+
+function get_torrents_by_view_as_map($view_name)
+{
+    $results = get_torrents_by_view($view_name);
+    return (map_multi_array($results, array(
+        'hash',
+        'name',
+        'chunk_size',
+        'peers_max',
+        'size_chunks',
+        'completed_chunks',
+        'is_complete',
+        'base_path'
+    )));
+    
+}
+
+function map_multi_array($indexarray, $maparray)
+{
+    $output = '';
+    foreach ($indexarray as $key => $value) {
+        if (is_array($value)) {
+            $output[] = map_multi_array($value, $maparray);
+        } else {
+            for ($i = 0; $i < count($indexarray); $i++) {
+                $tmp[$maparray[$i]] = $indexarray[$i];
+            }
+            $output = $tmp;
+        }
+        
+    }
+    return $output;
+}
+
+function arrayFlatten($array, $filter)
+{
+    $flattern = array();
+    foreach ($array as $key => $value) {
+        $new_key    = array_keys($value);
+        $flattern[] = str_replace($filter, '', $value[$new_key[0]]);
+    }
+    return $flattern;
+}
+
+function stop_torrent($hash)
+{
+    
+    $request  = xmlrpc_encode_request("d.stop", array(
+        $hash,
+        null
+    ));
+    $output[] = do_call($request);
+    $request  = xmlrpc_encode_request("d.close", array(
+        $hash,
+        null
+    ));
+    $output[] = do_call($request);
+    return $output;
+}
+function set_peers($hash, $max_peers)
+{
+    $request = xmlrpc_encode_request("d.set_peers_max", array(
+        $hash,
+        $max_peers
+    ));
+    $output  = do_call($request);
+    return $output;
+}
+
+function delete_torrent($hash)
+{
+    
+    stop_torrent($hash);
+    $request  = xmlrpc_encode_request("d.delete_tied", array(
+        $hash,
+        null
+    ));
+    $output[] = do_call($request);
+    $request  = xmlrpc_encode_request("d.erase", array(
+        $hash,
+        null
+    ));
+    $output[] = do_call($request);
+    return $output;
+}
+
+function check_for_files_exist($torrent_array_of_files, $base_path = Config::LOCAL_TORRENT_PATH)
+{
+    foreach ($torrent_array_of_files as $index => $file) {
+        print_debug("Looking for : $base_path$file");
+        if (!file_exists($base_path . $file) || file_exists($base_path . $file . '.lftp-pget-status')) {
+            print_debug("File Not Found : $base_path$file");
+            return false;
+        }
+    }
+    return true;
+}
+
+function mapPropertyToField($result, $property)
+{
+    $result[$property] = $property;
+    return $result;
+}
+
+function addDoubleQuotes($string)
+{
+    return '"' . $string . '"';
+}
+
+
+function print_debug($output)
+{
+    if (Config::DEBUG) {
+        if (is_array($output)) {
+            var_export($output);
+        } else {
+            print($output);
+        }
+        print PHP_EOL;
+    }
+}
+
+function run_filebot($path)
+{
+    //add path to the LOCAL_TORRENT_PATH config path , since this will most likely have a filename in part of it lets ensure it is only the path
+    $path_prefix = Config::LOCAL_TORRENT_PATH;
+    $path_joined = $path_prefix . $path;
+    $full_path   = pathinfo($path_joined, PATHINFO_DIRNAME);
+    print_debug("about to run filebot on path $full_path");
+    $arrCommand   = array();
+    $arrCommand[] = 'filebot';
+    $arrCommand[] = '-script';
+    $arrCommand[] = 'fn:amc';
+    $arrCommand[] = '--output';
+    $arrCommand[] = addDoubleQuotes(AMC_OUTPUT_PATH);
+    $arrCommand[] = '--action';
+    $arrCommand[] = 'move';
+    $arrCommand[] = '--conflict';
+    $arrCommand[] = 'override';
+    $arrCommand[] = '--def';
+    $arrCommand[] = 'artwork=y';
+    $arrCommand[] = '--def';
+    $arrCommand[] = 'clean=y';
+    $arrCommand[] = '-non-strict';
+    $arrCommand[] = addDoubleQuotes($full_path);
+    $arrCommand[] = '--log-file';
+    $arrCommand[] = 'amc.log';
+    $arrCommand[] = '--def';
+    $arrCommand[] = 'excludeList=amc.txt';
+    
+    $shell_command = implode(" ", $arrCommand);
+    print_debug("filebot command: $shell_command");
+    system($shell_command);
+    
+}
+
+//clean up files on the host server we have the files for already locally
+
+$torrent_list = get_files_by_hash(get_torrents_by_view('seeding'));
+
+foreach ($torrent_list as $torrent_name => $attrib) {
+    print_debug("##### Processing $torrent_name ####");
+	
+    if (check_for_files_exist($attrib['files']) === true) {
+        
+        print_debug("All Files for $torrent_name exist!");
+        print_debug("Hash: " . $attrib['hash']);
+        print_debug("Stop Torrent");
+        print_debug(stop_torrent($attrib['hash']));
+		print_debug("Delete Torrent");
+        print_debug(delete_torrent($attrib['hash']));
+		print_debug("Remove Torrent Files");
+        Remove_Torrent_Files($torrent_name);
+        Config::LOCAL_TORRENT_PATH;
+		if (count($attrib['files']) > 0) {
+        run_filebot($attrib['files'][0]);
+		} else {
+			print_debug("no files seem to exist... not running filebot");
+		}
+		
+    } else {
+        print_debug("Missing some files for  $torrent_name !!!");
+        print_debug($attrib['hash']);
+    }
+    print_debug("==========================================================");
+}
+
+//if torrents are downloading then set the peers_max to the configured limit, this is handy when your host defaults to a low number
+$torrent_list = get_torrents_by_view_as_map('main');
+if (is_array($torrent_list) && count($torrent_list) > 0) {
+    foreach ($torrent_list as $torrent_name => $attrib) {
+        print_debug($attrib);
+        if ($attrib['peers_max'] < Config::PEERS_MAX) { //check if less than Config::PEERS_MAX this will allow user to manually set higher through web UI
+		print_debug("Setting peers_max to " . Config::PEERS_MAX);
+            print_debug(set_peers($attrib['hash'], Config::PEERS_MAX));
+        } else {
+			print_debug("peers max already set for this torrent skipping...");					
+		}
+    }
+}
+?>
